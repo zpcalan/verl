@@ -152,20 +152,46 @@ class RLHFDataset(Dataset):
     def _read_files_and_tokenize(self):
         dataframes = []
         for parquet_file in self.data_files:
+            # logger.info(f"parquet_file is {parquet_file}")
             # read parquet files and cache
             dataframe = datasets.load_dataset("parquet", data_files=parquet_file)["train"]
+            
+            # # Print raw data from dataframe
+            # print(f"\n{'='*80}")
+            # print(f"Raw data from parquet file: {parquet_file}")
+            # print(f"{'='*80}")
+            # print(f"Dataset info: {dataframe}")
+            # print(f"Dataset features: {dataframe.features}")
+            # print(f"Dataset columns: {dataframe.column_names}")
+            # print(f"Number of rows: {len(dataframe)}")
+            
+            # # Print first few rows
+            # if len(dataframe) > 0:
+            #     print(f"\nFirst 3 rows of raw data:")
+            #     for i in range(min(3, len(dataframe))):
+            #         print(f"\n--- Row {i} ---")
+            #         row = dataframe[i]
+            #         for key, value in row.items():
+            #             # Truncate long values for readability
+            #             if isinstance(value, str) and len(value) > 200:
+            #                 print(f"  {key}: {value[:200]}... (truncated, total length: {len(value)})")
+            #             else:
+            #                 print(f"  {key}: {value}")
+            
             dataframes.append(dataframe)
         self.dataframe: datasets.Dataset = datasets.concatenate_datasets(dataframes)
 
         total = len(self.dataframe)
-        print(f"dataset len: {len(self.dataframe)}")
+        print(f"\ndataset len: {len(self.dataframe)}")
 
         if self.max_samples > 0 and self.max_samples < total:
             if self.shuffle:
+                print(f"shuffle dataset with seed {self.seed}")
                 rngs_args = (self.seed,) if self.seed is not None else ()
                 rng = np.random.default_rng(*rngs_args)
                 indices = rng.choice(total, size=self.max_samples, replace=False)
             else:
+                print(f"not shuffle dataset")
                 indices = np.arange(self.max_samples)
             self.dataframe = self.dataframe.select(indices.tolist())
             print(f"selected {self.max_samples} random samples out of {total}")
@@ -293,7 +319,9 @@ class RLHFDataset(Dataset):
         """
         row_dict: dict = self.dataframe[item]
         messages = self._build_messages(row_dict)
+        # logger.warning(f"messages is {messages}")
         model_inputs = {}
+        print(f"messages is {messages}", flush=True)
 
         if self.processor is not None:
             from verl.utils.dataset.vision_utils import process_image, process_video
@@ -360,9 +388,11 @@ class RLHFDataset(Dataset):
                     "chat_template should be provided in apply_chat_template_kwargs or tokenizer config, "
                     "models like GLM can copy chat_template.jinja from instruct models"
                 )
-            raw_prompt = self.tokenizer.apply_chat_template(
-                messages, add_generation_prompt=True, tokenize=False, **self.apply_chat_template_kwargs
-            )
+            # raw_prompt = self.tokenizer.apply_chat_template(
+            #     messages, add_generation_prompt=True, tokenize=False, **self.apply_chat_template_kwargs
+            # )
+            raw_prompt = messages
+            # logger.warning(f"after apply_chat_template raw_prompt is {raw_prompt}")
             model_inputs = self.tokenizer(raw_prompt, return_tensors="pt", add_special_tokens=False)
             input_ids = model_inputs.pop("input_ids")
             attention_mask = model_inputs.pop("attention_mask")
@@ -415,6 +445,8 @@ class RLHFDataset(Dataset):
         row_dict["input_ids"] = input_ids[0]
         row_dict["attention_mask"] = attention_mask[0]
         row_dict["position_ids"] = position_ids[0]
+        
+        print(f"{len(input_ids)} input_ids is {self.tokenizer.decode(row_dict["input_ids"])}", flush=True)
 
         raw_prompt_ids = self.tokenizer.encode(raw_prompt, add_special_tokens=False)
         if len(raw_prompt_ids) > self.max_prompt_length:

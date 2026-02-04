@@ -35,7 +35,7 @@ from safetensors.torch import save_file
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp.api import FullStateDictConfig, ShardedStateDictConfig, StateDictType
-
+from transformers import AutoTokenizer
 try:
     # for torch 2.5+
     from torch.distributed.tensor import DTensor
@@ -656,7 +656,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
         log_gpu_memory_usage("After load_fsdp_model_to_gpu", logger=logger)
-
+        print(f"rillout thread")
         peft_config = None
         peft_model = getattr(self.actor_module_fsdp, "_fsdp_wrapped_module", self.actor_module_fsdp)
         if hasattr(peft_model, "peft_config"):  # LoRA
@@ -670,7 +670,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 params = {replace_lora_wrapper(k, peft_config): v for k, v in params.items()}
         else:
             params = self.actor_module_fsdp.state_dict()
-
+        logger.info(f"rollout timeline1")
         params = convert_weight_keys(
             params, getattr(self.actor_module_fsdp, "_fsdp_wrapped_module", self.actor_module_fsdp)
         )
@@ -690,11 +690,13 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 base_model_params, getattr(self.actor_module_fsdp, "_fsdp_wrapped_module", self.actor_module_fsdp)
             )
 
+        logger.info(f"rollout timeline2")
         log_gpu_memory_usage("Before offload_fsdp_model_to_cpu", logger=logger)
         if self._is_offload_param:
             offload_fsdp_model_to_cpu(self.actor_module_fsdp)
         log_gpu_memory_usage("After offload_fsdp_model_to_cpu", logger=logger)
 
+        logger.info(f"rollout timeline3")
         set_expandable_segments(False)
 
         if peft_config is not None and self.base_sync_done:
@@ -706,6 +708,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 for name, param in params.items()
             )
 
+        logger.info(f"rollout timeline4")
         if self.config.rollout.free_cache_engine:
             await self.rollout.resume(tags=["weights"])
         log_gpu_memory_usage("After resume weights", logger=logger)
@@ -927,7 +930,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             log_gpu_memory_usage("After switch to rollout mode", logger=logger)
 
         with simple_timer("generate_sequences", timing_generate):
+            # logger.info(f"start generate_sequences with prompt {prompts}")
             output = self.rollout.generate_sequences(prompts=prompts)
+            # logger.info(f"after generate_sequences output {output}")
 
         if self._is_actor:
             loop.run_until_complete(self.trainer_mode())
@@ -1578,6 +1583,7 @@ class RewardModelWorker(Worker, DistProfilerExtension):
     def __init__(self, config):
         Worker.__init__(self)
 
+        self.tokenizer = AutoTokenizer.from_pretrained("/data/k8s/zpc/Qwen2.5-Coder-7B")
         omega_profiler_config = config.get("profiler", {})
         profiler_config = omega_conf_to_dataclass(omega_profiler_config, dataclass_type=ProfilerConfig)
         if omega_profiler_config.get("tool", None) in ["npu", "nsys", "torch", "torch_memory"]:
@@ -1590,6 +1596,7 @@ class RewardModelWorker(Worker, DistProfilerExtension):
             self,
             DistProfiler(rank=self.rank, config=profiler_config, tool_config=tool_config),
         )
+        self.count = 0
 
         import torch.distributed
 
@@ -1665,11 +1672,13 @@ class RewardModelWorker(Worker, DistProfilerExtension):
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
             model_config.classifier_dropout = 0.0
+            logger.warning(f"model path is {local_path}")
             reward_module = AutoModelForTokenClassification.from_pretrained(
                 pretrained_model_name_or_path=local_path,
                 config=model_config,
                 torch_dtype=torch.bfloat16,
                 attn_implementation="flash_attention_2",
+                # attn_implementation="sdpa",
                 trust_remote_code=trust_remote_code,
             )
 
@@ -1680,6 +1689,13 @@ class RewardModelWorker(Worker, DistProfilerExtension):
             )
 
             reward_module.to(torch.bfloat16)
+        print(f"self {reward_module.state_dict()["score.weight"]} {reward_module.state_dict()["score.weight"].shape}")
+        for name, param in reward_module.named_parameters():
+            print(f"parameter name: {name}")
+            print(f"  shape: {param.shape}")
+            print(f"  dtype: {param.dtype}")
+            print(f"  device: {param.device}")
+            print(f"  requires_grad: {param.requires_grad}")
 
         auto_wrap_policy = get_fsdp_wrap_policy(module=reward_module, config=self.config.model.fsdp_config)
 
@@ -1720,6 +1736,48 @@ class RewardModelWorker(Worker, DistProfilerExtension):
         # This is used to import external_lib into the huggingface systems
         import_external_libs(self.config.model.get("external_lib", None))
         self.reward_module = self._build_model(config=self.config)
+    
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def export_reward_model_weights(self, export_path: str = None):
+        """
+        Export reward model weights to a file for comparison with local model.
+        
+        Args:
+            export_path: Path to save the exported weights. If None, uses default path.
+        """
+        import os
+        from verl.utils.fsdp_utils import get_fsdp_full_state_dict
+        
+        if export_path is None:
+            export_path = f"reward_model_weights_rank_{self.rank}.pt"
+        
+        logger.info(f"Exporting reward model weights to {export_path}")
+        
+        # Get full state dict from FSDP model
+        state_dict = get_fsdp_full_state_dict(
+            self.reward_module, 
+            offload_to_cpu=True, 
+            rank0_only=True
+        )
+        
+        if self.rank == 0:
+            # Save state dict
+            torch.save(state_dict, export_path)
+            logger.info(f"Successfully exported reward model weights to {export_path}")
+            logger.info(f"Total number of parameters: {len(state_dict)}")
+            
+            # Print some key information
+            logger.info("Sample parameter keys and shapes:")
+            for i, (key, value) in enumerate(state_dict.items()):
+                if i < 10:  # Print first 10 keys
+                    logger.info(f"  {key}: {value.shape} {value.dtype}")
+                else:
+                    break
+            
+            return export_path
+        else:
+            logger.info(f"Rank {self.rank} skipped export (only rank 0 exports)")
+            return None
 
     def _forward_micro_batch(self, micro_batch):
         from verl.utils.attention_utils import index_first_axis, pad_input, rearrange, unpad_input
@@ -1773,15 +1831,42 @@ class RewardModelWorker(Worker, DistProfilerExtension):
                 # pad it back
                 rm_score = pad_input(reward_rmpad, indices=indices, batch=batch_size, seqlen=seqlen).squeeze(-1)
             else:
+                # for i in range(input_ids.shape[0]):
+                #     input_padding_token_id = 151643
+                #     # mask_padding_token_id = 0
+                #     non_padding_inputs = input_ids[i] != input_padding_token_id
+                #     masks = attention_mask[i].nonzero()
+                #     logger.info(f"mask indices are {masks[0]} {masks[-1]}")
+                #     logger.info(f"zpc input_ids are {len(non_padding_inputs)} {non_padding_inputs.nonzero()[0]} {non_padding_inputs.nonzero()[-1]}")
+                #     logger.info(f"input_ids {i} is {self.tokenizer.decode(input_ids[i], skip_special_tokens=True)}")
+                # logger.info(type(self.reward_module))
+                # logger.info("class name is " + self.reward_module.__class__.__name__)
+                self.count += 1
+                # Only dump the first batch.
+                # if self.rank == 0 and self.count == 1:
+                #     np.save("input_ids.npy", input_ids.cpu().numpy())
+                #     np.save("attention_mask.npy", attention_mask.cpu().numpy())
+                #     np.save("position_ids.npy", position_ids.cpu().numpy())
+                # print(f"self.rank is {self.rank} {os.getenv("CUDA_VISIBLE_DEVICES")}")
+                # dev = torch.device(f"cuda:0")
+                # input_ids = torch.from_numpy(np.load("/data/k8s/zpc/verl/input_ids.npy")).to(dev)
+                # attention_mask = torch.from_numpy(np.load("/data/k8s/zpc/verl/attention_mask.npy")).to(dev)
+                # position_ids = torch.from_numpy(np.load("/data/k8s/zpc/verl/position_ids.npy")).to(dev)
                 output = self.reward_module(
                     input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids, use_cache=False
                 )
+                logger.info(f"output logits shape is {output.logits} {output.logits.shape}")
                 rm_score = output.logits  # (batch_size, seq_len, 1)
                 rm_score = rm_score.squeeze(-1)
+                print(f"zpc value is {rm_score}")
+                np.save(f"final_score_{dist.get_rank()}.py", rm_score.float().cpu().numpy())
+                logger.info(f"rm_score is {rm_score} {rm_score.shape}")
 
             # extract the result of the last valid token
             eos_mask_idx = torch.argmax(position_ids * attention_mask, dim=-1)  # (bsz,)
-            rm_score = rm_score[torch.arange(batch_size), eos_mask_idx]
+            # use token score before eos token.
+            rm_score = rm_score[torch.arange(batch_size), eos_mask_idx - 1]
+            logger.info(f"final rm_score is {rm_score} {rm_score.shape}")
             return rm_score
 
     def _expand_to_token_level(self, data: DataProto, scores: torch.Tensor):
@@ -1811,6 +1896,8 @@ class RewardModelWorker(Worker, DistProfilerExtension):
         rm_attention_mask = []
 
         for i in range(data.batch.batch_size[0]):
+            print(f"non_tensor_batch keys: {data.non_tensor_batch.keys()}, len {len(data.non_tensor_batch["raw_prompt"])} data.batch.batch_size: {data.batch.batch_size[0]}")
+            print(f"non_tensor_batch raw_prompt: {data.non_tensor_batch['raw_prompt'][i]}")
             if not isinstance(data.non_tensor_batch["raw_prompt"][i], list | np.ndarray):
                 raise TypeError(
                     f"raw_prompt must be a list or numpy array, got {type(data.non_tensor_batch['raw_prompt'][i])}"
@@ -1869,6 +1956,7 @@ class RewardModelWorker(Worker, DistProfilerExtension):
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="reward"))
     @DistProfiler.annotate(color="brown")
     def compute_rm_score(self, data: DataProto):
+        logger.info(f"start compute_rm_score with data")
         import itertools
 
         from verl.utils.seqlen_balancing import get_reverse_idx, rearrange_micro_batches
@@ -1878,6 +1966,7 @@ class RewardModelWorker(Worker, DistProfilerExtension):
         if self._do_switch_chat_template:
             rm_data = self._switch_chat_template(data)
         else:
+            print(f"len of data batch {len(data.batch)} keys {data.batch.keys()}, input id length {len(data.batch['input_ids'])}")
             rm_input_ids = data.batch["input_ids"]
             rm_attention_mask = data.batch["attention_mask"]
             rm_position_ids = data.batch["position_ids"]
@@ -1890,7 +1979,7 @@ class RewardModelWorker(Worker, DistProfilerExtension):
 
         # Support all hardwares
         rm_data = rm_data.to(get_device_id())
-
+        self.f = open(f"rm_score_and_inputs_{self.rank}.log", "a")
         # perform forward computation
         with self.ulysses_sharding_manager:
             use_dynamic_bsz = self.config.use_dynamic_bsz
@@ -1919,7 +2008,7 @@ class RewardModelWorker(Worker, DistProfilerExtension):
         # unshard the root FSDP module
         if self.world_size > 1 and fsdp_version(self.reward_module) == 1:
             self.reward_module._handle.reshard(True)
-
+        print(f"output reward's shape is {token_level_scores.shape}")
         output = output.to("cpu")
         return output
 

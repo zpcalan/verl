@@ -21,10 +21,12 @@ This trainer supports model-agonistic model initialization with huggingface
 import json
 import os
 import uuid
+import time
 from collections import defaultdict
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pprint import pprint
+from transformers import AutoTokenizer
 from typing import Optional
 
 import numpy as np
@@ -205,9 +207,14 @@ def compute_advantage(
     Returns:
         DataProto: The updated data with computed advantages and returns.
     """
+    real_tokenizer = AutoTokenizer.from_pretrained("/data/k8s/zpc/Qwen2.5-Coder-7B")
     # Back-compatible with trainers that do not compute response mask in fit
     if "response_mask" not in data.batch.keys():
         data.batch["response_mask"] = compute_response_mask(data)
+    print(f"data.batch['input_ids'] is {data.batch['input_ids']} {data.batch['input_ids'].shape}")
+    for input in data.batch["input_ids"]:
+        inputs = real_tokenizer.decode(input, skip_special_tokens=True)
+        print(f"inputs is {inputs} {len(inputs)}")
     # prepare response group
     if adv_estimator == AdvantageEstimator.GAE:
         # Compute advantages and returns using Generalized Advantage Estimation (GAE)
@@ -311,7 +318,6 @@ class RayPPOTrainer:
         self.config = config
         self.reward_fn = reward_fn
         self.val_reward_fn = val_reward_fn
-
         self.hybrid_engine = config.actor_rollout_ref.hybrid_engine
         assert self.hybrid_engine, "Currently, only support hybrid engine"
 
@@ -552,7 +558,7 @@ class RayPPOTrainer:
             )
 
             # we only do validation on rule-based rm
-            if self.config.reward_model.enable and test_batch[0].non_tensor_batch["reward_model"]["style"] == "model":
+            if self.config.reward_model.enable and test_batch[0].non_tensor_batch.get("reward_model", {}).get("style") == "model":
                 return {}
 
             # Store original inputs
@@ -759,6 +765,7 @@ class RayPPOTrainer:
         if self.use_rm:
             self.rm_wg = all_wg[str(Role.RewardModel)]
             self.rm_wg.init_model()
+            # export_path = self.rm_wg.export_reward_model_weights("reward_model_exported.pt")
 
         # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
         self.actor_rollout_wg = all_wg[str(Role.ActorRollout)]
@@ -978,13 +985,13 @@ class RayPPOTrainer:
 
         # perform validation before training
         # currently, we only support validation using the reward_function.
-        if self.val_reward_fn is not None and self.config.trainer.get("val_before_train", True):
-            val_metrics = self._validate()
-            assert val_metrics, f"{val_metrics=}"
-            pprint(f"Initial validation metrics: {val_metrics}")
-            logger.log(data=val_metrics, step=self.global_steps)
-            if self.config.trainer.get("val_only", False):
-                return
+        # if self.val_reward_fn is not None and self.config.trainer.get("val_before_train", True):
+        #     val_metrics = self._validate()
+        #     assert val_metrics, f"{val_metrics=}"
+        #     pprint(f"Initial validation metrics: {val_metrics}")
+        #     logger.log(data=val_metrics, step=self.global_steps)
+        #     if self.config.trainer.get("val_only", False):
+        #         return
 
         if self.config.actor_rollout_ref.rollout.get("skip_rollout", False):
             rollout_skip = RolloutSkip(self.config, self.actor_rollout_wg)
@@ -1008,6 +1015,11 @@ class RayPPOTrainer:
 
         for epoch in range(self.config.trainer.total_epochs):
             for batch_dict in self.train_dataloader:
+                # import pdb; pdb.set_trace()
+                print(f"batch_dict is {batch_dict}", flush=True)
+                for input_ids in batch_dict["input_ids"]:
+                    print(f"input_ids is {input_ids}", flush=True)
+                    print(f"tokenizer.decode(input_ids) is {self.tokenizer.decode(input_ids)}", flush=True)
                 metrics = {}
                 timing_raw = {}
 
@@ -1036,6 +1048,7 @@ class RayPPOTrainer:
                 with marked_timer("step", timing_raw):
                     # generate a batch
                     with marked_timer("gen", timing_raw, color="red"):
+                        print(f"Start generating sequences: {self.global_steps} {time.time()}")
                         if not self.async_rollout_mode:
                             gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch_output)
                         else:
@@ -1087,7 +1100,7 @@ class RayPPOTrainer:
 
                     # compute global_valid tokens
                     batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
-
+                    # assert False
                     with marked_timer("reward", timing_raw, color="yellow"):
                         # compute reward model score
                         if self.use_rm and "rm_scores" not in batch.batch.keys():
@@ -1100,7 +1113,7 @@ class RayPPOTrainer:
                             )
                         else:
                             reward_tensor, reward_extra_infos_dict = compute_reward(batch, self.reward_fn)
-
+                    print(f"end generate reward {reward_tensor} {reward_tensor.shape}")
                     # Operating Mode Selection:
                     # - Bypass mode: Sets old_log_probs = rollout_log_probs (2 policies: π_rollout, π_θ)
                     # - Decoupled mode: Recomputes old_log_probs as proximal anchor (3 policies: π_rollout, π_old, π_θ)
@@ -1117,7 +1130,9 @@ class RayPPOTrainer:
                         )
                     else:  # Recompute old_log_probs
                         with marked_timer("old_log_prob", timing_raw, color="blue"):
+                            print(f"start compute_log_prob")
                             old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
+                            print(f"end compute_log_prob")
                             entropys = old_log_prob.batch["entropys"]
                             response_masks = batch.batch["response_mask"]
                             loss_agg_mode = self.config.actor_rollout_ref.actor.loss_agg_mode
@@ -1137,6 +1152,7 @@ class RayPPOTrainer:
                     assert "old_log_probs" in batch.batch, f'"old_log_prob" not in {batch.batch.keys()=}'
 
                     if self.use_reference_policy:
+                        print(f"start compute_ref_log_prob")
                         # compute reference log_prob
                         with marked_timer(str(Role.RefPolicy), timing_raw, color="olive"):
                             if not self.ref_in_actor:
@@ -1144,7 +1160,7 @@ class RayPPOTrainer:
                             else:
                                 ref_log_prob = self.actor_rollout_wg.compute_ref_log_prob(batch)
                             batch = batch.union(ref_log_prob)
-
+                        print(f"end compute_ref_log_prob")
                     # compute values
                     if self.use_critic:
                         with marked_timer("values", timing_raw, color="cyan"):
@@ -1190,6 +1206,7 @@ class RayPPOTrainer:
                             "norm_adv_by_std_in_grpo", True
                         )  # GRPO adv normalization factor
 
+                        print(f"start compute_advantage")
                         batch = compute_advantage(
                             batch,
                             adv_estimator=self.config.algorithm.adv_estimator,
@@ -1199,7 +1216,7 @@ class RayPPOTrainer:
                             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
                             config=self.config.algorithm,
                         )
-
+                        print(f"end compute_advantage")
                     # update critic
                     if self.use_critic:
                         with marked_timer("update_critic", timing_raw, color="pink"):
@@ -1210,11 +1227,13 @@ class RayPPOTrainer:
                     # implement critic warmup
                     if self.config.trainer.critic_warmup <= self.global_steps:
                         # update actor
+                        print(f"start update_actor")
                         with marked_timer("update_actor", timing_raw, color="red"):
                             batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
                             actor_output = self.actor_rollout_wg.update_actor(batch)
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
+                        print(f"end update_actor")
 
                     # Log rollout generations if enabled
                     rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
@@ -1222,16 +1241,16 @@ class RayPPOTrainer:
                         self._log_rollout_data(batch, reward_extra_infos_dict, timing_raw, rollout_data_dir)
 
                 # validate
-                if (
-                    self.val_reward_fn is not None
-                    and self.config.trainer.test_freq > 0
-                    and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0)
-                ):
-                    with marked_timer("testing", timing_raw, color="green"):
-                        val_metrics: dict = self._validate()
-                        if is_last_step:
-                            last_val_metrics = val_metrics
-                    metrics.update(val_metrics)
+                # if (
+                #     self.val_reward_fn is not None
+                #     and self.config.trainer.test_freq > 0
+                #     and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0)
+                # ):
+                #     with marked_timer("testing", timing_raw, color="green"):
+                #         val_metrics: dict = self._validate()
+                #         if is_last_step:
+                #             last_val_metrics = val_metrics
+                #     metrics.update(val_metrics)
 
                 # Check if the ESI (Elastic Server Instance)/training plan is close to expiration.
                 esi_close_to_expiration = should_save_ckpt_esi(

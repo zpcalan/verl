@@ -20,7 +20,9 @@ import os
 from abc import ABC
 from collections import OrderedDict
 from contextlib import contextmanager, nullcontext
-
+import logging
+logger = logging.getLogger(__file__)
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 import torch
 import torch.distributed as dist
 import torch.nn as nn
@@ -607,6 +609,7 @@ def layered_summon_lora_params(fsdp_module) -> OrderedDict:
                 get_torch_device().empty_cache()
     return lora_params
 
+from verl.utils.profiler import DistProfiler, DistProfilerExtension, ProfilerConfig, log_gpu_memory_usage, simple_timer
 
 def collect_lora_params(module: FSDP, layered_summon: bool, base_sync_done: bool) -> OrderedDict:
     """
@@ -636,6 +639,8 @@ def collect_lora_params(module: FSDP, layered_summon: bool, base_sync_done: bool
                         for name, param in lora_params.items()
                     }
                 else:
+                    log_gpu_memory_usage("Before model.to2", logger=logger)
+                    logger.info(f"model size is {sum(p.numel() for p in peft_model.base_model.model.parameters())} ")
                     model = peft_model.base_model.model
                     orig_dev = "cpu" if "cpu" in str(next(model.parameters()).device) else get_device_name()
                     model = model.to("cpu")
@@ -648,9 +653,12 @@ def collect_lora_params(module: FSDP, layered_summon: bool, base_sync_done: bool
                             if hasattr(param, "full_tensor")
                             else param.detach().cpu()
                         )
+                    log_gpu_memory_usage("Before model.to3", logger=logger)
                     model = model.to(orig_dev)
+                    logger.info(f"after model size is {sum(p.numel() for p in peft_model.base_model.model.parameters())} ")
             get_torch_device().empty_cache()
     else:
+        logger.info(f"load for first time")
         if base_sync_done:
             lora_params = get_peft_model_state_dict(peft_model)
         else:

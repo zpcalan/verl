@@ -60,6 +60,7 @@ def compute_sppo_loss(
 class DataParallelSPPOActor(DataParallelPPOActor):
     @GPUMemoryLogger(role="dp actor", logger=logger)
     def update_policy(self, data: DataProto):
+        print(f"zpc enter DataParallelSPPOActor update_policy")
         # make sure we are in training mode
         self.actor_module.train()
 

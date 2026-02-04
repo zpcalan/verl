@@ -299,13 +299,13 @@ def compute_grpo_outcome_advantage(
             shape is (bs, response_length)
     """
     scores = token_level_rewards.sum(dim=-1)
-
+    print(f"sum of token_level_rewards is {scores} {scores.shape}")
     id2score = defaultdict(list)
     id2mean = {}
     id2std = {}
 
     with torch.no_grad():
-        bsz = scores.shape[0]
+        bsz = scores.shape[0] # 8
         for i in range(bsz):
             id2score[index[i]].append(scores[i])
         for idx in id2score:
@@ -936,6 +936,7 @@ def compute_policy_loss_vanilla(
     )
 
     negative_approx_kl = log_prob - old_log_prob
+    print(f"zpc negative_approx_kl is {negative_approx_kl} {negative_approx_kl.shape} {negative_approx_kl.eq(0).all()}")
     # Clamp negative_approx_kl for stability
     negative_approx_kl = torch.clamp(negative_approx_kl, min=-20.0, max=20.0)
     ratio = torch.exp(negative_approx_kl)

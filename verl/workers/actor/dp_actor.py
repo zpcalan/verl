@@ -372,6 +372,7 @@ class DataParallelPPOActor(BasePPOActor):
     def update_policy(self, data: DataProto):
         # make sure we are in training mode
         self.actor_module.train()
+        print(f"zpc enter DataParallelPPOActor update_policy")
 
         temperature = data.meta_info["temperature"]  # temperature must be in the data.meta_info to avoid silent error
 
@@ -453,6 +454,7 @@ class DataParallelPPOActor(BasePPOActor):
                             old_log_prob = model_inputs["old_log_probs"]
 
                     loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
+                    print(f"zpc loss_mode is {loss_mode}")
                     # vanilla -> verl.trainer.ppo.core_algos.compute_policy_loss_vanilla
 
                     # Extract pre-computed rollout correction weights if present
