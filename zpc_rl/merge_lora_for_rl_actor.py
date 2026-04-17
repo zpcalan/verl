@@ -11,9 +11,10 @@ sft_model_path = "/data/k8s/zpc/Custom-LLaMA-Factory/arkts_linter_model_best/"
 pretrained_model = AutoModelForCausalLM.from_pretrained(sft_model_path, trust_remote_code=True)
 model_after_lora = PeftModel.from_pretrained(pretrained_model, lora_adapter_path).merge_and_unload()
 
+model_after_lora = model_after_lora.to(torch.bfloat16)
 
 # 5. 保存模型（直接保存，避免 AutoModelForCausalLMWithValueHead 的额外开销）
-merged_rl_model_path = "/data/k8s/zpc/Custom-LLaMA-Factory/arkts_linter_after_7_epoch_rl"
+merged_rl_model_path = "/data/k8s/zpc/Custom-LLaMA-Factory/arkts_linter_after_7_epoch_rl_bf16"
 model_after_lora.save_pretrained(merged_rl_model_path)
 tokenizer = AutoTokenizer.from_pretrained(sft_model_path, trust_remote_code=True)
 tokenizer.save_pretrained(merged_rl_model_path)

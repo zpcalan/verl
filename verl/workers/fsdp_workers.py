@@ -867,6 +867,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @DistProfiler.annotate(color="red", role="actor_update")
     def update_actor(self, data: DataProto):
         assert self._is_actor
+        print(f"zpc update_actor {data.batch['advantages']} {data.batch['advantages'].shape}")
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
         if self._is_offload_optimizer:

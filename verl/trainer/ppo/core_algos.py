@@ -324,7 +324,8 @@ def compute_grpo_outcome_advantage(
             else:
                 scores[i] = scores[i] - id2mean[index[i]]
         scores = scores.unsqueeze(-1) * response_mask
-
+    
+    print(f"advs is {scores} {scores.shape} {response_mask} {response_mask.shape}")
     return scores, scores
 
 
@@ -937,6 +938,7 @@ def compute_policy_loss_vanilla(
 
     negative_approx_kl = log_prob - old_log_prob
     print(f"zpc negative_approx_kl is {negative_approx_kl} {negative_approx_kl.shape} {negative_approx_kl.eq(0).all()}")
+    print(f"zpc advs is {advantages} {advantages.shape}")
     # Clamp negative_approx_kl for stability
     negative_approx_kl = torch.clamp(negative_approx_kl, min=-20.0, max=20.0)
     ratio = torch.exp(negative_approx_kl)
@@ -954,8 +956,11 @@ def compute_policy_loss_vanilla(
         pg_losses1, pg_losses2
     )  # max(-ratio * A, -clip(ratio, 1-cliprange, 1+cliprange) * A)
     pg_clipfrac = verl_F.masked_mean(torch.gt(pg_losses2, pg_losses1).float(), response_mask)
-
+    print(f"pg_losses1 is {pg_losses1} {pg_losses1.shape}")
+    print(f"pg_losses2 is {pg_losses2} {pg_losses2.shape}")
+    print(f"clip_pg_losses1 is {clip_pg_losses1} {clip_pg_losses1.shape}")
     pg_losses3 = -advantages * clip_ratio_c
+    print(f"pg_losses3 is {pg_losses3} {pg_losses3.shape} {clip_ratio_c} ")
     clip_pg_losses2 = torch.min(pg_losses3, clip_pg_losses1)
     pg_clipfrac_lower = verl_F.masked_mean(
         torch.gt(clip_pg_losses1, pg_losses3) * (advantages < 0).float(), response_mask
@@ -974,6 +979,7 @@ def compute_policy_loss_vanilla(
         "actor/ppo_kl": ppo_kl.detach().item(),
         "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
     }
+    print(f"zpc pg_losses is {pg_losses} {pg_losses.shape}")
     return pg_loss, pg_metrics
 
 

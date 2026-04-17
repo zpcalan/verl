@@ -1216,7 +1216,7 @@ class RayPPOTrainer:
                             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
                             config=self.config.algorithm,
                         )
-                        print(f"end compute_advantage")
+                        print(f"end compute_advantage {batch.batch['advantages']} {batch.batch['advantages'].shape}")
                     # update critic
                     if self.use_critic:
                         with marked_timer("update_critic", timing_raw, color="pink"):

@@ -519,6 +519,7 @@ class DataParallelPPOActor(BasePPOActor):
                     if self.scaler is not None:
                         self.scaler.scale(loss).backward()
                     else:
+                        print(f"final loss is {loss} {loss.shape}")
                         loss.backward()
 
                     micro_batch_metrics["actor/pg_loss"] = pg_loss.detach().item() * loss_scale_factor
